@@ -252,7 +252,93 @@ Do not reuse TensorRT engines generated on a different TensorRT version, GPU arc
 
 ---
 
-## 9. Build The C++ Application
+## 9. Use A Custom Trained LPRNet OCR Model
+
+If you train your own LPRNet model, export it to ONNX first, then build the TensorRT engine on the same machine where you will run this project.
+
+Place the custom OCR model files in the `models/` folder:
+
+```text
+models/my_lprnet.onnx
+models/my_lprnet.engine
+```
+
+You can also replace the default file names if you want to keep the existing config unchanged:
+
+```text
+models/us_lprnet_baseline18_deployable.onnx
+models/us_lprnet_baseline18_deployable.engine
+```
+
+Recommended custom model workflow:
+
+1. Train LPRNet with the same plate format you want to recognize.
+2. Export the trained model to ONNX.
+3. Copy the ONNX file into `models/`.
+4. Build the TensorRT engine from that ONNX file on the target machine.
+5. Update `configs/config_ocr.txt` to point to the new ONNX and engine files.
+6. Test OCR on saved plate crops from `evidence/`.
+7. Run the full detector -> tracker -> crop -> OCR -> CSV pipeline.
+
+Example TensorRT build command for a custom LPRNet ONNX:
+
+```bash
+trtexec \
+  --onnx=models/my_lprnet.onnx \
+  --saveEngine=models/my_lprnet.engine \
+  --minShapes=image_input:1x3x48x96 \
+  --optShapes=image_input:1x3x48x96 \
+  --maxShapes=image_input:1x3x48x96
+```
+
+Then update `configs/config_ocr.txt`:
+
+```text
+model-engine-file=models/my_lprnet.engine
+onnx-file=models/my_lprnet.onnx
+input-layer=image_input
+sequence-layer=tf_op_layer_ArgMax
+confidence-layer=tf_op_layer_Max
+alphabet=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ
+blank-index=36
+input-width=96
+input-height=48
+min-confidence=0.60
+```
+
+Important points for custom LPRNet models:
+
+- The ONNX input layer name must match `input-layer`.
+- The decoded sequence output layer must match `sequence-layer`.
+- The confidence output layer must match `confidence-layer`.
+- `input-width` and `input-height` must match the training/export size. The current pipeline uses `96x48`.
+- `alphabet` must exactly match the characters used during training.
+- `blank-index` must match the CTC blank class index used by the model.
+- If your model was trained only for one country or plate style, OCR quality will be poor on other plate formats.
+
+Test the custom OCR model on one crop:
+
+```bash
+./build/deepstream-anpr-ocr \
+  --image /absolute/path/to/evidence/crop.jpg \
+  --ocr-config configs/config_ocr.txt
+```
+
+If OCR works on crops, run the full pipeline:
+
+```bash
+./build/deepstream-anpr \
+  --source /absolute/path/to/video.mp4 \
+  --camera-id camera-01 \
+  --no-display \
+  --run
+```
+
+TensorRT engine files are machine-specific. If you move the project to another GPU, CUDA version, TensorRT version, or driver setup, rebuild `models/my_lprnet.engine` from `models/my_lprnet.onnx`.
+
+---
+
+## 10. Build The C++ Application
 
 Configure and build:
 
@@ -273,7 +359,7 @@ The shared library `libnvdsinfer_custom_yolo_plate.so` is loaded by DeepStream `
 
 ---
 
-## 10. Run Full ANPR Pipeline
+## 11. Run Full ANPR Pipeline
 
 Run full pipeline on a video file without display:
 
@@ -373,7 +459,7 @@ Runtime tuning options:
 
 ---
 
-## 11. Test OCR On One Plate Crop
+## 12. Test OCR On One Plate Crop
 
 After you have a cropped plate image, run:
 
@@ -402,7 +488,7 @@ The full pipeline calls this helper automatically in `--server` mode. You normal
 
 ---
 
-## 12. Important Config Files
+## 13. Important Config Files
 
 Detector config:
 
@@ -467,7 +553,7 @@ min-crop-height=8
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### `Syntax error: "(" unexpected`
 
@@ -550,7 +636,7 @@ If crops are saved but OCR text is wrong:
 
 ---
 
-## 14. Final Workflow Notes
+## 15. Final Workflow Notes
 
 - Full detector -> tracker -> padded crop -> persistent OCR worker -> CSV event flow is implemented.
 - OCR no longer starts a new process for every crop. The main app starts one OCR worker and streams crop paths to it.
