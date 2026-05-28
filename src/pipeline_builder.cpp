@@ -26,10 +26,10 @@ std::string PipelineBuilder::buildLaunchPipeline() const {
         << " height=" << config_.height
         << " live-source=" << (startsWith(uri, "rtsp://") ? "1" : "0")
         << " ! nvinfer config-file-path=" << quote(config_.detector_config.string())
-        << " ! nvtracker tracker-width=640 tracker-height=384 gpu-id=0"
+        << " ! nvtracker name=tracker tracker-width=640 tracker-height=384 gpu-id=0"
         << " ll-lib-file=" << quote(config_.tracker_lib.string())
         << " ll-config-file=" << quote(config_.tracker_config.string())
-        << " ! nvvideoconvert ! nvdsosd ! ";
+        << " ! nvvideoconvert ! nvdsosd name=osd ! ";
 
     if (config_.display) {
         pipeline << "nveglglessink sync=" << (config_.sync ? "true" : "false");

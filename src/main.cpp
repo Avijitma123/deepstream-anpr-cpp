@@ -1,9 +1,7 @@
 #include "db_writer.hpp"
 #include "event_manager.hpp"
-#include "metadata_probe.hpp"
-#include "ocr_engine.hpp"
+#include "full_pipeline.hpp"
 #include "pipeline_builder.hpp"
-#include "plate_cropper.hpp"
 #include "plate_postprocess.hpp"
 
 #include <filesystem>
@@ -18,10 +16,8 @@ struct CliOptions {
     std::string camera_id{"camera-01"};
     std::filesystem::path detector_config{"configs/config_infer_plate_detector.txt"};
     std::filesystem::path tracker_config{"/opt/nvidia/deepstream/deepstream-9.0/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml"};
-    std::filesystem::path ocr_config{"configs/config_ocr.txt"};
     std::filesystem::path evidence_dir{"evidence"};
     std::filesystem::path events_csv{"output/events.csv"};
-    std::filesystem::path ocr_image;
     bool run_pipeline{false};
     bool display{true};
 };
@@ -33,10 +29,8 @@ void printUsage(const char* executable) {
         << "  --camera-id <id>             Camera identifier for generated events\n"
         << "  --detector-config <path>     DeepStream nvinfer config path\n"
         << "  --tracker-config <path>      DeepStream tracker config path\n"
-        << "  --ocr-config <path>          OCR config path\n"
         << "  --evidence-dir <path>        Plate crop output directory\n"
         << "  --events <path>              CSV event log path\n"
-        << "  --ocr-image <path>           Run OCR directly on one cropped plate image\n"
         << "  --no-display                 Use fakesink instead of rendering output\n"
         << "  --run                        Launch the generated GStreamer pipeline\n"
         << "  --help                       Show this help\n";
@@ -60,14 +54,10 @@ bool parseArgs(int argc, char** argv, CliOptions& options) {
             options.detector_config = requireValue(arg);
         } else if (arg == "--tracker-config") {
             options.tracker_config = requireValue(arg);
-        } else if (arg == "--ocr-config") {
-            options.ocr_config = requireValue(arg);
         } else if (arg == "--evidence-dir") {
             options.evidence_dir = requireValue(arg);
         } else if (arg == "--events") {
             options.events_csv = requireValue(arg);
-        } else if (arg == "--ocr-image") {
-            options.ocr_image = requireValue(arg);
         } else if (arg == "--no-display") {
             options.display = false;
         } else if (arg == "--run") {
@@ -80,7 +70,7 @@ bool parseArgs(int argc, char** argv, CliOptions& options) {
         }
     }
 
-    if (options.source.empty() && options.ocr_image.empty()) {
+    if (options.source.empty()) {
         printUsage(argv[0]);
         return false;
     }
@@ -97,28 +87,6 @@ int main(int argc, char** argv) {
             return options.source.empty() ? 1 : 0;
         }
 
-        anpr::PlateCropper cropper(options.evidence_dir);
-        if (!cropper.prepare()) {
-            std::cerr << "Failed to prepare evidence directory: " << options.evidence_dir << '\n';
-            return 1;
-        }
-
-        anpr::OcrEngine ocr({options.ocr_config});
-        if (!ocr.load()) {
-            std::cerr << "Failed to load OCR config: " << options.ocr_config << '\n';
-            return 1;
-        }
-
-        if (!options.ocr_image.empty()) {
-            const auto result = ocr.recognize({}, options.ocr_image);
-            if (result.text.empty()) {
-                std::cerr << "No OCR result accepted for: " << options.ocr_image << '\n';
-                return 2;
-            }
-            std::cout << result.text << " confidence=" << result.confidence << '\n';
-            return 0;
-        }
-
         anpr::EventManager event_manager({}, anpr::DbWriter(options.events_csv));
         if (!event_manager.start()) {
             std::cerr << "Failed to open event log: " << options.events_csv << '\n';
@@ -126,8 +94,6 @@ int main(int argc, char** argv) {
         }
 
         anpr::PlatePostProcessor post_processor;
-        anpr::MetadataProbe probe(cropper, ocr, post_processor, event_manager);
-        (void)probe;
 
         anpr::PipelineConfig pipeline_config;
         pipeline_config.source_uri = options.source;
@@ -139,7 +105,12 @@ int main(int argc, char** argv) {
         std::cout << "DeepStream pipeline:\n" << builder.buildLaunchPipeline() << "\n";
 
         if (options.run_pipeline) {
-            return builder.run();
+            anpr::FullPipelineConfig full_config;
+            full_config.pipeline = pipeline_config;
+            full_config.camera_id = options.camera_id;
+            full_config.evidence_dir = options.evidence_dir;
+            anpr::FullPipeline full_pipeline(full_config, post_processor, event_manager);
+            return full_pipeline.run();
         }
 
         std::cout << "\nRun again with --run to launch it on a DeepStream-enabled host.\n";
