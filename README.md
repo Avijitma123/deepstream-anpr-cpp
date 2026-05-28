@@ -84,3 +84,375 @@ Event Manager
         |
         v
 Database / Evidence Storage / API
+```
+
+---
+
+## 4. Current Implementation Status
+
+The repository currently includes:
+
+- A CMake-based C++ application: `deepstream-anpr`
+- DeepStream detector pipeline using `nvurisrcbin`, `nvstreammux`, `nvinfer`, `nvtracker`, `nvvideoconvert`, and `nvdsosd`
+- Custom YOLO plate detector parser: `src/yolo_plate_parser.cpp`
+- TensorRT LPRNet OCR engine wrapper: `src/ocr_engine.cpp`
+- OCR direct image test mode: `--ocr-image`
+- CSV event writer and duplicate suppression scaffolding
+
+The detector inference path is working. The OCR model can be built and loaded. The next integration step is to connect DeepStream metadata to actual plate crop extraction and feed those crops into OCR automatically.
+
+---
+
+## 5. System Requirements
+
+Use an Ubuntu machine with an NVIDIA GPU and a working NVIDIA driver.
+
+Tested project assumptions:
+
+- Ubuntu Linux
+- NVIDIA GPU
+- CUDA installed under `/usr/local/cuda`
+- TensorRT with `trtexec` available on `PATH`
+- NVIDIA DeepStream 9.0 installed under:
+
+```bash
+/opt/nvidia/deepstream/deepstream-9.0
+```
+
+Required tools:
+
+```bash
+cmake
+g++
+make
+trtexec
+gst-launch-1.0
+gst-inspect-1.0
+convert
+```
+
+`convert` is provided by ImageMagick and is currently used by the OCR image preprocessing path.
+
+Install missing build tools if needed:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake imagemagick
+```
+
+DeepStream, CUDA, TensorRT, and NVIDIA driver installation should be done from NVIDIA's official packages for your GPU/driver/CUDA version.
+
+---
+
+## 6. Repository Setup
+
+Clone the repository:
+
+```bash
+git clone git@github.com:Avijitma123/deepstream-anpr-cpp.git
+cd deepstream-anpr-cpp
+```
+
+If you are using HTTPS instead of SSH:
+
+```bash
+git clone https://github.com/Avijitma123/deepstream-anpr-cpp.git
+cd deepstream-anpr-cpp
+```
+
+Check that DeepStream plugins are visible to the system GStreamer:
+
+```bash
+GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream-9.0/lib/gst-plugins \
+LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream-9.0/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+/usr/bin/gst-inspect-1.0 nvstreammux
+```
+
+If this prints plugin details for `nvstreammux`, DeepStream plugin discovery is working.
+
+Important: if you use Conda, it may put its own `gst-launch-1.0` before the system binary. This project explicitly launches `/usr/bin/gst-launch-1.0` to avoid Conda GStreamer conflicts.
+
+---
+
+## 7. Model Files
+
+Model binaries are intentionally ignored by Git. Put model files under `models/`.
+
+Expected detector files:
+
+```text
+models/plate_detector.onnx
+models/plate_detector.onnx_b1_gpu0_fp16.engine
+models/labels.txt
+```
+
+Expected OCR files:
+
+```text
+models/us_lprnet_baseline18_deployable.onnx
+models/us_lprnet_baseline18_deployable.engine
+```
+
+The current detector config uses:
+
+```text
+models/plate_detector.onnx_b1_gpu0_fp16.engine
+```
+
+The current OCR config uses:
+
+```text
+models/us_lprnet_baseline18_deployable.engine
+```
+
+If an engine file is missing, it can be generated from the ONNX file.
+
+---
+
+## 8. Build TensorRT Engines
+
+Build all available engines:
+
+```bash
+./scripts/build_engine.sh
+```
+
+Or build the plate detector engine manually:
+
+```bash
+trtexec \
+  --onnx=models/plate_detector.onnx \
+  --saveEngine=models/plate_detector.onnx_b1_gpu0_fp16.engine \
+  --fp16
+```
+
+Build the LPRNet OCR engine manually:
+
+```bash
+trtexec \
+  --onnx=models/us_lprnet_baseline18_deployable.onnx \
+  --saveEngine=models/us_lprnet_baseline18_deployable.engine \
+  --minShapes=image_input:1x3x48x96 \
+  --optShapes=image_input:1x3x48x96 \
+  --maxShapes=image_input:1x3x48x96
+```
+
+Do not reuse TensorRT engines generated on a different TensorRT version, GPU architecture, or machine unless you know they are compatible. If DeepStream reports a serialization version mismatch, rebuild the engine from ONNX on the target machine.
+
+---
+
+## 9. Build The C++ Application
+
+Configure and build:
+
+```bash
+cmake -S . -B build
+cmake --build build
+```
+
+Expected outputs:
+
+```text
+build/deepstream-anpr
+build/libnvdsinfer_custom_yolo_plate.so
+```
+
+The shared library `libnvdsinfer_custom_yolo_plate.so` is loaded by DeepStream `nvinfer` through `configs/config_infer_plate_detector.txt`.
+
+---
+
+## 10. Run Detector Inference
+
+Run on a video file without display:
+
+```bash
+./build/deepstream-anpr \
+  --source /absolute/path/to/video.mp4 \
+  --no-display \
+  --run
+```
+
+Run on a video file with display:
+
+```bash
+./build/deepstream-anpr \
+  --source /absolute/path/to/video.mp4 \
+  --run
+```
+
+Run on an RTSP stream:
+
+```bash
+./build/deepstream-anpr \
+  --source rtsp://username:password@camera-ip:554/stream1 \
+  --camera-id gate-01 \
+  --no-display \
+  --run
+```
+
+You can also use:
+
+```bash
+./scripts/run_rtsp.sh "rtsp://username:password@camera-ip:554/stream1"
+```
+
+The app prints the generated GStreamer pipeline before/after execution. A successful file run should end with EOS:
+
+```text
+Got EOS from element "pipeline0".
+EOS received - stopping pipeline...
+```
+
+---
+
+## 11. Test OCR On One Plate Crop
+
+After you have a cropped plate image, run:
+
+```bash
+./build/deepstream-anpr \
+  --ocr-image /absolute/path/to/plate_crop.jpg
+```
+
+The OCR path:
+
+1. Resizes the crop to `96x48`
+2. Converts it to RGB
+3. Runs TensorRT LPRNet inference
+4. Decodes `tf_op_layer_ArgMax`
+5. Prints the recognized text and confidence
+
+Example output:
+
+```text
+ABC1234 confidence=0.91
+```
+
+If no OCR result is accepted, the command exits with code `2`.
+
+---
+
+## 12. Important Config Files
+
+Detector config:
+
+```text
+configs/config_infer_plate_detector.txt
+```
+
+Key settings:
+
+```text
+model-engine-file=../models/plate_detector.onnx_b1_gpu0_fp16.engine
+onnx-file=../models/plate_detector.onnx
+labelfile-path=../models/labels.txt
+custom-lib-path=../build/libnvdsinfer_custom_yolo_plate.so
+parse-bbox-func-name=NvDsInferParseYoloPlate
+output-blob-names=output0
+infer-dims=3;640;640
+num-detected-classes=1
+```
+
+OCR config:
+
+```text
+configs/config_ocr.txt
+```
+
+Key settings:
+
+```text
+model-engine-file=models/us_lprnet_baseline18_deployable.engine
+onnx-file=models/us_lprnet_baseline18_deployable.onnx
+input-layer=image_input
+sequence-layer=tf_op_layer_ArgMax
+confidence-layer=tf_op_layer_Max
+alphabet=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ
+blank-index=36
+input-width=96
+input-height=48
+min-confidence=0.60
+```
+
+Tracker config is currently passed directly to `nvtracker`:
+
+```text
+/opt/nvidia/deepstream/deepstream-9.0/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml
+```
+
+---
+
+## 13. Troubleshooting
+
+### `Syntax error: "(" unexpected`
+
+This happens when a GStreamer caps string such as `video/x-raw(memory:NVMM)` is passed through the shell without quoting. The project now quotes this internally.
+
+### `no element "nvstreammux"`
+
+DeepStream plugins are not visible to the GStreamer binary being used. Check:
+
+```bash
+which gst-launch-1.0
+```
+
+If it points to Conda, use `/usr/bin/gst-launch-1.0` or deactivate Conda. The project already uses `/usr/bin/gst-launch-1.0` internally.
+
+Verify DeepStream plugin discovery:
+
+```bash
+GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream-9.0/lib/gst-plugins \
+LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream-9.0/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+/usr/bin/gst-inspect-1.0 nvstreammux
+```
+
+### TensorRT serialization mismatch
+
+If you see an error similar to:
+
+```text
+Serialization assertion stdVersionRead == kSERIALIZATION_VERSION failed
+```
+
+delete or ignore the old engine and rebuild it from ONNX on the same machine:
+
+```bash
+./scripts/build_engine.sh
+```
+
+### `Could not open custom lib`
+
+Make sure the custom parser library exists:
+
+```bash
+ls -lh build/libnvdsinfer_custom_yolo_plate.so
+```
+
+If missing, rebuild:
+
+```bash
+cmake --build build
+```
+
+### `Failed to load OCR config`
+
+Check that the OCR ONNX exists:
+
+```bash
+ls -lh models/us_lprnet_baseline18_deployable.onnx
+```
+
+Then build the OCR engine:
+
+```bash
+./scripts/build_engine.sh
+```
+
+---
+
+## 14. Current Limitations
+
+- Detector inference works through DeepStream.
+- OCR TensorRT loading and direct crop image inference are implemented.
+- Automatic crop extraction from DeepStream frame metadata is the next major integration step.
+- Event logging and duplicate suppression are implemented as application modules, but they will become active once metadata-driven crop extraction is connected.
