@@ -72,9 +72,11 @@ Metadata Probe
         |
         v
 Plate Crop Extraction
+DeepStream Object Encoder
         |
         v
-OCR Engine
+OCR Helper Process
+TensorRT LPRNet
         |
         v
 Plate Text Post-processing
@@ -93,13 +95,22 @@ Database / Evidence Storage / API
 The repository currently includes:
 
 - A CMake-based C++ application: `deepstream-anpr`
+- A separate OCR helper executable: `deepstream-anpr-ocr`
 - DeepStream detector pipeline using `nvurisrcbin`, `nvstreammux`, `nvinfer`, `nvtracker`, `nvvideoconvert`, and `nvdsosd`
 - Custom YOLO plate detector parser: `src/yolo_plate_parser.cpp`
 - TensorRT LPRNet OCR engine wrapper: `src/ocr_engine.cpp`
-- OCR direct image test mode: `--ocr-image`
-- CSV event writer and duplicate suppression scaffolding
+- DeepStream metadata probe after `nvtracker`
+- DeepStream object encoder crop saving into `evidence/`
+- OCR helper execution for each selected crop
+- CSV event writer and duplicate suppression
 
-The detector inference path is working. The OCR model can be built and loaded. The next integration step is to connect DeepStream metadata to actual plate crop extraction and feed those crops into OCR automatically.
+The full pipeline is operational:
+
+```text
+video/RTSP -> plate detector -> tracker -> crop save -> OCR helper -> event CSV
+```
+
+The current OCR helper is isolated in a separate executable because DeepStream 9 loads TensorRT 10 through `nvinfer`, while the LPRNet OCR path links TensorRT 11 on this machine. Keeping OCR in a helper process avoids TensorRT library conflicts inside one process.
 
 ---
 
@@ -254,6 +265,7 @@ Expected outputs:
 
 ```text
 build/deepstream-anpr
+build/deepstream-anpr-ocr
 build/libnvdsinfer_custom_yolo_plate.so
 ```
 
@@ -261,26 +273,28 @@ The shared library `libnvdsinfer_custom_yolo_plate.so` is loaded by DeepStream `
 
 ---
 
-## 10. Run Detector Inference
+## 10. Run Full ANPR Pipeline
 
-Run on a video file without display:
+Run full pipeline on a video file without display:
 
 ```bash
 ./build/deepstream-anpr \
   --source /absolute/path/to/video.mp4 \
+  --camera-id camera-01 \
   --no-display \
   --run
 ```
 
-Run on a video file with display:
+Run full pipeline on a video file with display:
 
 ```bash
 ./build/deepstream-anpr \
   --source /absolute/path/to/video.mp4 \
+  --camera-id camera-01 \
   --run
 ```
 
-Run on an RTSP stream:
+Run full pipeline on an RTSP stream:
 
 ```bash
 ./build/deepstream-anpr \
@@ -296,11 +310,41 @@ You can also use:
 ./scripts/run_rtsp.sh "rtsp://username:password@camera-ip:554/stream1"
 ```
 
-The app prints the generated GStreamer pipeline before/after execution. A successful file run should end with EOS:
+During a successful run, the application:
+
+1. Starts an in-process GStreamer/DeepStream pipeline
+2. Detects plates with `nvinfer`
+3. Tracks detections with `nvtracker`
+4. Reads `NvDsObjectMeta` from a pad probe after tracker
+5. Saves selected crops into `evidence/`
+6. Calls `build/deepstream-anpr-ocr` for OCR
+7. Writes accepted events into `output/events.csv`
+
+Example successful output:
 
 ```text
-Got EOS from element "pipeline0".
-EOS received - stopping pipeline...
+ANPR event: ABC1234 confidence=0.91 crop=evidence/camera-01_4_0_20260528T062138Z.jpg
+EOS received - stopping full pipeline
+Accepted events: 5, suppressed events: 0
+```
+
+A successful file run should end with EOS:
+
+```text
+EOS received - stopping full pipeline
+```
+
+Generated outputs:
+
+```text
+evidence/*.jpg
+output/events.csv
+```
+
+Event CSV columns:
+
+```text
+timestamp,camera_id,tracking_id,plate_text,confidence,left,top,width,height,evidence_path
 ```
 
 ---
@@ -310,8 +354,8 @@ EOS received - stopping pipeline...
 After you have a cropped plate image, run:
 
 ```bash
-./build/deepstream-anpr \
-  --ocr-image /absolute/path/to/plate_crop.jpg
+./build/deepstream-anpr-ocr \
+  --image /absolute/path/to/plate_crop.jpg
 ```
 
 The OCR path:
@@ -329,6 +373,8 @@ ABC1234 confidence=0.91
 ```
 
 If no OCR result is accepted, the command exits with code `2`.
+
+The full pipeline calls this helper automatically. You normally use this command only when testing OCR quality on saved crops from `evidence/`.
 
 ---
 
@@ -379,6 +425,17 @@ Tracker config is currently passed directly to `nvtracker`:
 ```text
 /opt/nvidia/deepstream/deepstream-9.0/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml
 ```
+
+Full pipeline defaults:
+
+```text
+evidence-dir=evidence
+events=output/events.csv
+ocr-helper=build/deepstream-anpr-ocr
+max-ocr-attempts=5
+```
+
+The default OCR attempt cap keeps sample runs predictable because spawning a TensorRT OCR helper for every detection on every frame is slow. Increase this in `include/full_pipeline.hpp` when you move to a persistent OCR worker or in-process TensorRT-compatible OCR path.
 
 ---
 
@@ -448,11 +505,26 @@ Then build the OCR engine:
 ./scripts/build_engine.sh
 ```
 
+### Full pipeline is slow
+
+The current full pipeline uses `build/deepstream-anpr-ocr` as an external OCR helper to avoid TensorRT 10/11 conflicts with DeepStream. This is correct for compatibility, but slower than an in-process OCR engine.
+
+The default `max_ocr_attempts` is capped in `include/full_pipeline.hpp`. For production, replace the helper-per-crop call with a persistent OCR worker process or align DeepStream and OCR to the same TensorRT major version.
+
+### OCR text is inaccurate
+
+If crops are saved but OCR text is wrong:
+
+1. Inspect the crop images in `evidence/`
+2. Confirm the OCR model is trained for your target plate format
+3. Tune crop padding and resize preprocessing
+4. Check the configured alphabet and blank index in `configs/config_ocr.txt`
+
 ---
 
 ## 14. Current Limitations
 
-- Detector inference works through DeepStream.
-- OCR TensorRT loading and direct crop image inference are implemented.
-- Automatic crop extraction from DeepStream frame metadata is the next major integration step.
-- Event logging and duplicate suppression are implemented as application modules, but they will become active once metadata-driven crop extraction is connected.
+- Full detector -> tracker -> crop -> OCR -> CSV event flow is implemented.
+- OCR currently runs as a helper process for TensorRT compatibility, so it is slower than a native in-process OCR stage.
+- OCR quality depends heavily on crop quality and whether the LPRNet model matches the target plate format.
+- The default full-pipeline run limits OCR attempts to keep local testing fast.
