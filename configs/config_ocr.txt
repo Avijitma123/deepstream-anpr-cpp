@@ -1,10 +1,10 @@
-# OCR runtime configuration.
-# The first implementation validates this file and exposes the OCR module boundary.
-# TensorRT bindings, alphabet, and decoder details should be added when the OCR model is finalized.
-
-model-engine-file=models/ocr.engine
-onnx-file=models/ocr.onnx
-input-layer=input
-output-layer=output
+model-engine-file=models/us_lprnet_baseline18_deployable.engine
+onnx-file=models/us_lprnet_baseline18_deployable.onnx
+input-layer=image_input
+sequence-layer=tf_op_layer_ArgMax
+confidence-layer=tf_op_layer_Max
 alphabet=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ
+blank-index=36
+input-width=96
+input-height=48
 min-confidence=0.60

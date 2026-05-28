@@ -19,12 +19,23 @@ add_executable(deepstream-anpr
 
 target_include_directories(deepstream-anpr PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    /usr/local/cuda/targets/x86_64-linux/include
+)
+
+target_link_directories(deepstream-anpr PRIVATE
+    /usr/local/cuda/lib64
 )
 
 target_compile_options(deepstream-anpr PRIVATE
     -Wall
     -Wextra
     -Wpedantic
+)
+
+target_link_libraries(deepstream-anpr PRIVATE
+    nvinfer
+    cuda
+    cudart
 )
 
 set(DEEPSTREAM_ROOT /opt/nvidia/deepstream/deepstream-9.0 CACHE PATH "DeepStream installation root")

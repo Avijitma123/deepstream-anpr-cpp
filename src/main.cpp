@@ -21,6 +21,7 @@ struct CliOptions {
     std::filesystem::path ocr_config{"configs/config_ocr.txt"};
     std::filesystem::path evidence_dir{"evidence"};
     std::filesystem::path events_csv{"output/events.csv"};
+    std::filesystem::path ocr_image;
     bool run_pipeline{false};
     bool display{true};
 };
@@ -35,6 +36,7 @@ void printUsage(const char* executable) {
         << "  --ocr-config <path>          OCR config path\n"
         << "  --evidence-dir <path>        Plate crop output directory\n"
         << "  --events <path>              CSV event log path\n"
+        << "  --ocr-image <path>           Run OCR directly on one cropped plate image\n"
         << "  --no-display                 Use fakesink instead of rendering output\n"
         << "  --run                        Launch the generated GStreamer pipeline\n"
         << "  --help                       Show this help\n";
@@ -64,6 +66,8 @@ bool parseArgs(int argc, char** argv, CliOptions& options) {
             options.evidence_dir = requireValue(arg);
         } else if (arg == "--events") {
             options.events_csv = requireValue(arg);
+        } else if (arg == "--ocr-image") {
+            options.ocr_image = requireValue(arg);
         } else if (arg == "--no-display") {
             options.display = false;
         } else if (arg == "--run") {
@@ -76,7 +80,7 @@ bool parseArgs(int argc, char** argv, CliOptions& options) {
         }
     }
 
-    if (options.source.empty()) {
+    if (options.source.empty() && options.ocr_image.empty()) {
         printUsage(argv[0]);
         return false;
     }
@@ -103,6 +107,16 @@ int main(int argc, char** argv) {
         if (!ocr.load()) {
             std::cerr << "Failed to load OCR config: " << options.ocr_config << '\n';
             return 1;
+        }
+
+        if (!options.ocr_image.empty()) {
+            const auto result = ocr.recognize({}, options.ocr_image);
+            if (result.text.empty()) {
+                std::cerr << "No OCR result accepted for: " << options.ocr_image << '\n';
+                return 2;
+            }
+            std::cout << result.text << " confidence=" << result.confidence << '\n';
+            return 0;
         }
 
         anpr::EventManager event_manager({}, anpr::DbWriter(options.events_csv));
