@@ -27,4 +27,22 @@ target_compile_options(deepstream-anpr PRIVATE
     -Wpedantic
 )
 
+set(DEEPSTREAM_ROOT /opt/nvidia/deepstream/deepstream-9.0 CACHE PATH "DeepStream installation root")
+set(CUDA_ROOT /usr/local/cuda CACHE PATH "CUDA installation root")
+
+add_library(nvdsinfer_custom_yolo_plate SHARED
+    src/yolo_plate_parser.cpp
+)
+
+target_include_directories(nvdsinfer_custom_yolo_plate PRIVATE
+    ${DEEPSTREAM_ROOT}/sources/includes
+    ${CUDA_ROOT}/targets/x86_64-linux/include
+)
+
+target_compile_options(nvdsinfer_custom_yolo_plate PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
 install(TARGETS deepstream-anpr RUNTIME DESTINATION bin)
