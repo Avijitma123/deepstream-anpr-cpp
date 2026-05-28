@@ -1,0 +1,30 @@
+# IDE/project-local files
+.idea/
+.vscode/
+
+# Build outputs
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+compile_commands.json
+
+# Runtime/generated outputs
+logs/
+output/
+evidence/
+*.log
+
+# DeepStream/TensorRT/model artifacts
+models/*.engine
+models/*.onnx
+models/*.plan
+models/*.trt
+
+# Native binaries and temporary files
+*.o
+*.so
+*.a
+*.out
+*.tmp
