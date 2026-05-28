@@ -19,6 +19,11 @@ logs/
 output/
 evidence/
 *.log
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.rtsp
 
 # DeepStream/TensorRT/model artifacts
 models/*.engine

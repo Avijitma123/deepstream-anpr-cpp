@@ -1,12 +1,11 @@
 [property]
 gpu-id=0
 net-scale-factor=0.0039215697906911373
-model-engine-file=models/plate_detector.engine
-onnx-file=models/plate_detector.onnx
-labelfile-path=models/labels.txt
-custom-lib-name=build/libnvdsinfer_custom_yolo_plate.so
+model-engine-file=../models/plate_detector.onnx_b1_gpu0_fp16.engine
+onnx-file=../models/plate_detector.onnx
+labelfile-path=../models/labels.txt
+custom-lib-path=../build/libnvdsinfer_custom_yolo_plate.so
 parse-bbox-func-name=NvDsInferParseYoloPlate
-parse-func=0
 output-blob-names=output0
 infer-dims=3;640;640
 batch-size=1

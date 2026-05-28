@@ -17,7 +17,7 @@ struct CliOptions {
     std::string source;
     std::string camera_id{"camera-01"};
     std::filesystem::path detector_config{"configs/config_infer_plate_detector.txt"};
-    std::filesystem::path tracker_config{"configs/config_tracker_NvDCF.txt"};
+    std::filesystem::path tracker_config{"/opt/nvidia/deepstream/deepstream-9.0/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml"};
     std::filesystem::path ocr_config{"configs/config_ocr.txt"};
     std::filesystem::path evidence_dir{"evidence"};
     std::filesystem::path events_csv{"output/events.csv"};

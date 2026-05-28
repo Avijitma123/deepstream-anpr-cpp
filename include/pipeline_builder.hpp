@@ -8,7 +8,8 @@ namespace anpr {
 struct PipelineConfig {
     std::string source_uri;
     std::filesystem::path detector_config{"configs/config_infer_plate_detector.txt"};
-    std::filesystem::path tracker_config{"configs/config_tracker_NvDCF.txt"};
+    std::filesystem::path tracker_config{"/opt/nvidia/deepstream/deepstream-9.0/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml"};
+    std::filesystem::path tracker_lib{"/opt/nvidia/deepstream/deepstream-9.0/lib/libnvds_nvmultiobjecttracker.so"};
     int width{1280};
     int height{720};
     int batch_size{1};

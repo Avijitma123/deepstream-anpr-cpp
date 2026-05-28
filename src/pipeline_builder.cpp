@@ -26,7 +26,9 @@ std::string PipelineBuilder::buildLaunchPipeline() const {
         << " height=" << config_.height
         << " live-source=" << (startsWith(uri, "rtsp://") ? "1" : "0")
         << " ! nvinfer config-file-path=" << quote(config_.detector_config.string())
-        << " ! nvtracker ll-config-file=" << quote(config_.tracker_config.string())
+        << " ! nvtracker tracker-width=640 tracker-height=384 gpu-id=0"
+        << " ll-lib-file=" << quote(config_.tracker_lib.string())
+        << " ll-config-file=" << quote(config_.tracker_config.string())
         << " ! nvvideoconvert ! nvdsosd ! ";
 
     if (config_.display) {
@@ -37,13 +39,17 @@ std::string PipelineBuilder::buildLaunchPipeline() const {
 
     pipeline
         << " nvurisrcbin uri=" << quote(uri) << " name=source ! "
-        << "queue ! nvvideoconvert ! video/x-raw(memory:NVMM),format=NV12 ! m.sink_0";
+        << "queue ! nvvideoconvert ! " << quote("video/x-raw(memory:NVMM),format=NV12") << " ! m.sink_0";
 
     return pipeline.str();
 }
 
 int PipelineBuilder::run() const {
-    const auto command = "gst-launch-1.0 -e " + buildLaunchPipeline();
+    const std::string command =
+        "GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream-9.0/lib/gst-plugins "
+        "LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream-9.0/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH} "
+        "/usr/bin/gst-launch-1.0 -e " +
+        buildLaunchPipeline();
     return std::system(command.c_str());
 }
 
