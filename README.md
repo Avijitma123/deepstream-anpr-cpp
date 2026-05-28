@@ -90,7 +90,113 @@ Database / Evidence Storage / API
 
 ---
 
-## 4. Current Implementation Status
+## 4. DeepStream Pipeline Code Flow
+
+The runtime application is started from `src/main.cpp`. It parses CLI options, creates the event writer, builds the DeepStream pipeline description, and then starts `FullPipeline`.
+
+Block diagram of the implemented code flow:
+
+```text
+src/main.cpp
+    |
+    | parse CLI arguments
+    | create EventManager + DbWriter
+    | create PipelineConfig
+    v
+src/pipeline_builder.cpp
+    |
+    | builds GStreamer launch string
+    v
++---------------------------------------------------------------------+
+|                         DeepStream Pipeline                         |
++---------------------------------------------------------------------+
+|                                                                     |
+|  nvurisrcbin                                                        |
+|      |                                                              |
+|      v                                                              |
+|  queue -> nvvideoconvert -> video/x-raw(memory:NVMM),format=NV12    |
+|      |                                                              |
+|      v                                                              |
+|  nvstreammux                                                        |
+|      |                                                              |
+|      v                                                              |
+|  nvinfer                                                            |
+|  plate detector model + src/yolo_plate_parser.cpp                   |
+|      |                                                              |
+|      v                                                              |
+|  nvtracker                                                          |
+|      |                                                              |
+|      v                                                              |
+|  tracker src pad probe                                              |
+|  src/full_pipeline.cpp::metadataProbe                               |
+|      |                                                              |
+|      v                                                              |
+|  nvvideoconvert -> nvdsosd -> display sink or fakesink              |
+|                                                                     |
++---------------------------------------------------------------------+
+```
+
+The metadata probe is where ANPR-specific business logic runs:
+
+```text
+metadataProbe
+    |
+    | read NvDsBatchMeta / NvDsFrameMeta / NvDsObjectMeta
+    | keep class_id 0 plate detections only
+    | apply min detector confidence and crop size filters
+    | suppress repeated OCR for the same tracker object id
+    v
+PlateCropper
+src/plate_cropper.cpp
+    |
+    | prepare evidence directory
+    | create safe unique crop path
+    v
+DeepStream Object Encoder
+nvds_obj_enc_process
+    |
+    | apply configurable crop padding
+    | save resized plate crop to evidence/*.jpg
+    v
+Persistent OCR Worker
+build/deepstream-anpr-ocr --server
+    |
+    | TensorRT LPRNet inference
+    | src/ocr_engine.cpp
+    v
+PlatePostProcessor
+src/plate_postprocess.cpp
+    |
+    | normalize text
+    | validate accepted plate result
+    v
+EventManager
+src/event_manager.cpp
+    |
+    | suppress duplicate events
+    v
+DbWriter
+src/db_writer.cpp
+    |
+    v
+output/events.csv
+```
+
+Pipeline element responsibilities:
+
+- `nvurisrcbin`: reads video file or RTSP stream.
+- `nvstreammux`: batches frames and creates DeepStream-compatible batched buffers.
+- `nvinfer`: runs the plate detector TensorRT engine configured by `configs/config_infer_plate_detector.txt`.
+- `src/yolo_plate_parser.cpp`: converts raw detector output into DeepStream object metadata.
+- `nvtracker`: assigns stable tracking IDs to detected plates.
+- `src/full_pipeline.cpp`: attaches the pad probe, filters detections, saves crops, calls OCR, and emits events.
+- `src/plate_cropper.cpp`: owns evidence directory preparation and crop filename generation.
+- `deepstream-anpr-ocr --server`: keeps the OCR TensorRT engine loaded and processes crop paths sent by the main pipeline.
+- `src/event_manager.cpp` and `src/db_writer.cpp`: write accepted events to CSV and suppress duplicates.
+
+---
+
+## 5. Current Implementation Status
 
 The repository currently includes:
 
@@ -114,7 +220,7 @@ The OCR engine is isolated in a separate executable because DeepStream 9 loads T
 
 ---
 
-## 5. System Requirements
+## 6. System Requirements
 
 Use an Ubuntu machine with an NVIDIA GPU and a working NVIDIA driver.
 
@@ -155,7 +261,7 @@ DeepStream, CUDA, TensorRT, and NVIDIA driver installation should be done from N
 
 ---
 
-## 6. Repository Setup
+## 7. Repository Setup
 
 Clone the repository:
 
@@ -185,7 +291,7 @@ Important: if you use Conda, it may put its own `gst-launch-1.0` before the syst
 
 ---
 
-## 7. Model Files
+## 8. Model Files
 
 Model binaries are intentionally ignored by Git. Put model files under `models/`.
 
@@ -220,7 +326,7 @@ If an engine file is missing, it can be generated from the ONNX file.
 
 ---
 
-## 8. Build TensorRT Engines
+## 9. Build TensorRT Engines
 
 Build all available engines:
 
@@ -252,7 +358,7 @@ Do not reuse TensorRT engines generated on a different TensorRT version, GPU arc
 
 ---
 
-## 9. Use A Custom Trained LPRNet OCR Model
+## 10. Use A Custom Trained LPRNet OCR Model
 
 If you train your own LPRNet model, export it to ONNX first, then build the TensorRT engine on the same machine where you will run this project.
 
@@ -338,7 +444,7 @@ TensorRT engine files are machine-specific. If you move the project to another G
 
 ---
 
-## 10. Build The C++ Application
+## 11. Build The C++ Application
 
 Configure and build:
 
@@ -359,7 +465,7 @@ The shared library `libnvdsinfer_custom_yolo_plate.so` is loaded by DeepStream `
 
 ---
 
-## 11. Run Full ANPR Pipeline
+## 12. Run Full ANPR Pipeline
 
 Run full pipeline on a video file without display:
 
@@ -459,7 +565,7 @@ Runtime tuning options:
 
 ---
 
-## 12. Test OCR On One Plate Crop
+## 13. Test OCR On One Plate Crop
 
 After you have a cropped plate image, run:
 
@@ -488,7 +594,7 @@ The full pipeline calls this helper automatically in `--server` mode. You normal
 
 ---
 
-## 13. Important Config Files
+## 14. Important Config Files
 
 Detector config:
 
@@ -553,7 +659,7 @@ min-crop-height=8
 
 ---
 
-## 14. Final Workflow Notes
+## 15. Final Workflow Notes
 
 - Full detector -> tracker -> padded crop -> persistent OCR worker -> CSV event flow is implemented.
 - OCR no longer starts a new process for every crop. The main app starts one OCR worker and streams crop paths to it.
