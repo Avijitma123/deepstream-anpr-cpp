@@ -6,17 +6,23 @@
 #include "nvbufsurface.h"
 #include "nvdsmeta.h"
 #include "nvds_obj_encode.h"
+#include "plate_cropper.hpp"
 
-#include <chrono>
 #include <array>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
-#include <cstdio>
 #include <algorithm>
 #include <sstream>
+#include <string>
 #include <unordered_set>
+#include <utility>
+
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace anpr {
 namespace {
@@ -25,63 +31,142 @@ struct ProbeContext {
     FullPipelineConfig config;
     PlatePostProcessor* post_processor{nullptr};
     EventManager* event_manager{nullptr};
+    PlateCropper* cropper{nullptr};
     NvDsObjEncCtxHandle encoder{nullptr};
-    std::uint64_t crop_index{0};
+    class OcrWorker* ocr_worker{nullptr};
     std::size_t ocr_attempts{0};
     std::unordered_set<std::uint64_t> processed_tracking_ids;
 };
 
-std::string timestampForFile() {
-    const auto now = std::chrono::system_clock::now();
-    const auto time = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-    gmtime_r(&time, &tm);
+class OcrWorker {
+public:
+    explicit OcrWorker(std::filesystem::path binary) : binary_(std::move(binary)) {}
 
-    std::ostringstream output;
-    output << std::put_time(&tm, "%Y%m%dT%H%M%SZ");
-    return output.str();
-}
+    ~OcrWorker() {
+        stop();
+    }
 
-std::string shellQuote(const std::string& value) {
-    std::string quoted = "'";
-    for (const char ch : value) {
-        if (ch == '\'') {
-            quoted += "'\\''";
-        } else {
-            quoted += ch;
+    bool start() {
+        int stdin_pipe[2]{};
+        int stdout_pipe[2]{};
+        if (pipe(stdin_pipe) != 0) {
+            return false;
+        }
+        if (pipe(stdout_pipe) != 0) {
+            close(stdin_pipe[0]);
+            close(stdin_pipe[1]);
+            return false;
+        }
+
+        child_pid_ = fork();
+        if (child_pid_ < 0) {
+            close(stdin_pipe[0]);
+            close(stdin_pipe[1]);
+            close(stdout_pipe[0]);
+            close(stdout_pipe[1]);
+            return false;
+        }
+
+        if (child_pid_ == 0) {
+            dup2(stdin_pipe[0], STDIN_FILENO);
+            dup2(stdout_pipe[1], STDOUT_FILENO);
+            const int dev_null = open("/dev/null", O_WRONLY);
+            if (dev_null >= 0) {
+                dup2(dev_null, STDERR_FILENO);
+                close(dev_null);
+            }
+            close(stdin_pipe[0]);
+            close(stdin_pipe[1]);
+            close(stdout_pipe[0]);
+            close(stdout_pipe[1]);
+            execl(binary_.c_str(), binary_.c_str(), "--server", static_cast<char*>(nullptr));
+            _exit(127);
+        }
+
+        close(stdin_pipe[0]);
+        close(stdout_pipe[1]);
+        input_ = fdopen(stdin_pipe[1], "w");
+        output_ = fdopen(stdout_pipe[0], "r");
+        if (input_ == nullptr || output_ == nullptr) {
+            if (input_ == nullptr) {
+                close(stdin_pipe[1]);
+            }
+            if (output_ == nullptr) {
+                close(stdout_pipe[0]);
+            }
+            stop();
+            return false;
+        }
+        return true;
+    }
+
+    OcrResult recognize(const std::filesystem::path& crop_path) {
+        if (input_ == nullptr || output_ == nullptr) {
+            return {};
+        }
+
+        std::fprintf(input_, "%s\n", crop_path.string().c_str());
+        std::fflush(input_);
+
+        std::array<char, 512> buffer{};
+        if (std::fgets(buffer.data(), static_cast<int>(buffer.size()), output_) == nullptr) {
+            return {};
+        }
+
+        std::istringstream stream(buffer.data());
+        std::string status;
+        stream >> status;
+        if (status != "OK") {
+            return {};
+        }
+
+        OcrResult result;
+        stream >> result.text >> result.confidence;
+        return result;
+    }
+
+private:
+    void stop() {
+        if (input_ != nullptr) {
+            std::fprintf(input_, "__quit__\n");
+            std::fflush(input_);
+            std::fclose(input_);
+            input_ = nullptr;
+        }
+        if (output_ != nullptr) {
+            std::fclose(output_);
+            output_ = nullptr;
+        }
+        if (child_pid_ > 0) {
+            int status = 0;
+            waitpid(child_pid_, &status, 0);
+            child_pid_ = -1;
         }
     }
-    quoted += "'";
-    return quoted;
-}
 
-OcrResult runOcrCommand(const std::filesystem::path& ocr_binary, const std::filesystem::path& crop_path) {
-    const auto command = shellQuote(ocr_binary.string()) + " --image " + shellQuote(crop_path.string()) + " 2>/dev/null";
-    FILE* pipe = popen(command.c_str(), "r");
-    if (pipe == nullptr) {
-        return {};
-    }
+    std::filesystem::path binary_;
+    pid_t child_pid_{-1};
+    FILE* input_{nullptr};
+    FILE* output_{nullptr};
+};
 
-    std::array<char, 256> buffer{};
-    std::string output;
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
-        output += buffer.data();
-    }
-    const int status = pclose(pipe);
-    if (status != 0 || output.empty()) {
-        return {};
+void applyCropPadding(NvDsObjectMeta* object_meta, const FullPipelineConfig& config, guint frame_width, guint frame_height) {
+    if (frame_width == 0 || frame_height == 0 || config.crop_padding_ratio <= 0.0F) {
+        return;
     }
 
-    std::istringstream stream(output);
-    OcrResult result;
-    stream >> result.text;
-    std::string confidence_token;
-    stream >> confidence_token;
-    const auto separator = confidence_token.find('=');
-    if (separator != std::string::npos) {
-        result.confidence = std::stof(confidence_token.substr(separator + 1));
-    }
-    return result;
+    auto& rect = object_meta->rect_params;
+    const float pad_x = rect.width * config.crop_padding_ratio;
+    const float pad_y = rect.height * config.crop_padding_ratio;
+    const float left = std::max(0.0F, rect.left - pad_x);
+    const float top = std::max(0.0F, rect.top - pad_y);
+    const float right = std::min(static_cast<float>(frame_width - 1), rect.left + rect.width + pad_x);
+    const float bottom = std::min(static_cast<float>(frame_height - 1), rect.top + rect.height + pad_y);
+
+    rect.left = left;
+    rect.top = top;
+    rect.width = std::max(1.0F, right - left);
+    rect.height = std::max(1.0F, bottom - top);
 }
 
 gboolean busCall(GstBus*, GstMessage* message, gpointer data) {
@@ -145,18 +230,31 @@ GstPadProbeReturn metadataProbe(GstPad*, GstPadProbeInfo* info, gpointer user_da
                 continue;
             }
 
+            if (object_meta->confidence < context->config.min_detector_confidence ||
+                object_meta->rect_params.width < context->config.min_crop_width ||
+                object_meta->rect_params.height < context->config.min_crop_height) {
+                continue;
+            }
+
             const auto tracking_id = static_cast<std::uint64_t>(object_meta->object_id);
-            if (context->ocr_attempts >= context->config.max_ocr_attempts ||
+            if ((context->config.max_ocr_attempts > 0 && context->ocr_attempts >= context->config.max_ocr_attempts) ||
                 context->processed_tracking_ids.find(tracking_id) != context->processed_tracking_ids.end()) {
                 continue;
             }
             context->processed_tracking_ids.insert(tracking_id);
             ++context->ocr_attempts;
 
-            std::filesystem::create_directories(context->config.evidence_dir);
-            const auto crop_path = context->config.evidence_dir /
-                                   (context->config.camera_id + "_" + std::to_string(frame_meta->frame_num) + "_" +
-                                    std::to_string(context->crop_index++) + "_" + timestampForFile() + ".jpg");
+            const auto event_time = std::chrono::system_clock::now();
+            PlateDetection detection;
+            detection.camera_id = context->config.camera_id;
+            detection.tracking_id = tracking_id;
+            detection.bbox.left = object_meta->rect_params.left;
+            detection.bbox.top = object_meta->rect_params.top;
+            detection.bbox.width = object_meta->rect_params.width;
+            detection.bbox.height = object_meta->rect_params.height;
+            detection.detector_confidence = object_meta->confidence;
+            detection.timestamp = event_time;
+            const auto crop_path = context->cropper->crop(detection);
 
             NvDsObjEncUsrArgs encode_args{};
             encode_args.saveImg = context->config.save_crops;
@@ -164,18 +262,22 @@ GstPadProbeReturn metadataProbe(GstPad*, GstPadProbeInfo* info, gpointer user_da
             encode_args.scaleImg = true;
             encode_args.scaledWidth = 96;
             encode_args.scaledHeight = 48;
-            encode_args.objNum = static_cast<int>(context->crop_index);
+            encode_args.objNum = static_cast<int>(tracking_id);
             encode_args.quality = 95;
             encode_args.isFrame = false;
             std::strncpy(encode_args.fileNameImg, crop_path.string().c_str(), FILE_NAME_SIZE - 1);
 
+            const auto original_rect = object_meta->rect_params;
+            applyCropPadding(object_meta, context->config, frame_meta->source_frame_width, frame_meta->source_frame_height);
             if (!nvds_obj_enc_process(context->encoder, &encode_args, surface, object_meta, frame_meta)) {
+                object_meta->rect_params = original_rect;
                 std::cerr << "Failed to encode plate crop: " << crop_path << '\n';
                 continue;
             }
             nvds_obj_enc_finish(context->encoder);
+            object_meta->rect_params = original_rect;
 
-            auto ocr_result = runOcrCommand(context->config.ocr_binary, crop_path);
+            auto ocr_result = context->ocr_worker->recognize(crop_path);
             auto accepted = context->post_processor->accept(ocr_result);
             if (!accepted.has_value()) {
                 ocr_result.text = context->post_processor->normalize(ocr_result.text);
@@ -194,11 +296,8 @@ GstPadProbeReturn metadataProbe(GstPad*, GstPadProbeInfo* info, gpointer user_da
             event.tracking_id = object_meta->object_id;
             event.plate_text = accepted->text;
             event.confidence = accepted->confidence;
-            event.timestamp = std::chrono::system_clock::now();
-            event.bbox.left = object_meta->rect_params.left;
-            event.bbox.top = object_meta->rect_params.top;
-            event.bbox.width = object_meta->rect_params.width;
-            event.bbox.height = object_meta->rect_params.height;
+            event.timestamp = event_time;
+            event.bbox = detection.bbox;
             event.evidence_path = crop_path.string();
 
             if (context->event_manager->submit(event)) {
@@ -258,6 +357,24 @@ int FullPipeline::run() {
     probe_context.config = config_;
     probe_context.post_processor = &post_processor_;
     probe_context.event_manager = &event_manager_;
+    PlateCropper cropper(config_.evidence_dir);
+    if (!cropper.prepare()) {
+        std::cerr << "Failed to prepare evidence directory: " << config_.evidence_dir << '\n';
+        gst_object_unref(probe_pad);
+        gst_object_unref(tracker);
+        gst_object_unref(pipeline);
+        return 1;
+    }
+    probe_context.cropper = &cropper;
+    OcrWorker ocr_worker(config_.ocr_binary);
+    if (!ocr_worker.start()) {
+        std::cerr << "Failed to start OCR worker: " << config_.ocr_binary << '\n';
+        gst_object_unref(probe_pad);
+        gst_object_unref(tracker);
+        gst_object_unref(pipeline);
+        return 1;
+    }
+    probe_context.ocr_worker = &ocr_worker;
     probe_context.encoder = nvds_obj_enc_create_context(0);
     if (probe_context.encoder == nullptr) {
         std::cerr << "Failed to create DeepStream object encoder context\n";

@@ -14,7 +14,11 @@ struct FullPipelineConfig {
     std::string camera_id{"camera-01"};
     std::filesystem::path evidence_dir{"evidence"};
     std::filesystem::path ocr_binary{"build/deepstream-anpr-ocr"};
-    std::size_t max_ocr_attempts{5};
+    std::size_t max_ocr_attempts{0};
+    float crop_padding_ratio{0.20F};
+    float min_detector_confidence{0.25F};
+    float min_crop_width{24.0F};
+    float min_crop_height{8.0F};
     bool save_crops{true};
 };
 

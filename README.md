@@ -75,7 +75,7 @@ Plate Crop Extraction
 DeepStream Object Encoder
         |
         v
-OCR Helper Process
+Persistent OCR Worker Process
 TensorRT LPRNet
         |
         v
@@ -101,16 +101,16 @@ The repository currently includes:
 - TensorRT LPRNet OCR engine wrapper: `src/ocr_engine.cpp`
 - DeepStream metadata probe after `nvtracker`
 - DeepStream object encoder crop saving into `evidence/`
-- OCR helper execution for each selected crop
+- Persistent OCR worker process for selected crops
 - CSV event writer and duplicate suppression
 
 The full pipeline is operational:
 
 ```text
-video/RTSP -> plate detector -> tracker -> crop save -> OCR helper -> event CSV
+video/RTSP -> plate detector -> tracker -> padded crop save -> persistent OCR worker -> event CSV
 ```
 
-The current OCR helper is isolated in a separate executable because DeepStream 9 loads TensorRT 10 through `nvinfer`, while the LPRNet OCR path links TensorRT 11 on this machine. Keeping OCR in a helper process avoids TensorRT library conflicts inside one process.
+The OCR engine is isolated in a separate executable because DeepStream 9 loads TensorRT 10 through `nvinfer`, while the LPRNet OCR path links TensorRT 11 on this machine. The full pipeline now starts this executable once in server mode and reuses it for crops, which avoids the old helper-per-crop startup cost while still avoiding TensorRT library conflicts inside one process.
 
 ---
 
@@ -285,6 +285,17 @@ Run full pipeline on a video file without display:
   --run
 ```
 
+For quick local testing, cap OCR attempts:
+
+```bash
+./build/deepstream-anpr \
+  --source /absolute/path/to/video.mp4 \
+  --camera-id camera-01 \
+  --no-display \
+  --run \
+  --max-ocr-attempts 5
+```
+
 Run full pipeline on a video file with display:
 
 ```bash
@@ -316,9 +327,11 @@ During a successful run, the application:
 2. Detects plates with `nvinfer`
 3. Tracks detections with `nvtracker`
 4. Reads `NvDsObjectMeta` from a pad probe after tracker
-5. Saves selected crops into `evidence/`
-6. Calls `build/deepstream-anpr-ocr` for OCR
-7. Writes accepted events into `output/events.csv`
+5. Filters low-confidence or very small detections
+6. Adds configurable padding around the detected plate box
+7. Saves selected crops into `evidence/`
+8. Sends crop paths to a persistent `build/deepstream-anpr-ocr --server` worker
+9. Writes accepted events into `output/events.csv`
 
 Example successful output:
 
@@ -345,6 +358,17 @@ Event CSV columns:
 
 ```text
 timestamp,camera_id,tracking_id,plate_text,confidence,left,top,width,height,evidence_path
+```
+
+Runtime tuning options:
+
+```text
+--max-ocr-attempts <n>       Limit OCR attempts; 0 means unlimited
+--crop-padding <ratio>       Add padding around each detector box before crop, default 0.20
+--min-det-confidence <n>     Skip detections below this confidence, default 0.25
+--min-crop-width <px>        Skip boxes narrower than this, default 24
+--min-crop-height <px>       Skip boxes shorter than this, default 8
+--ocr-binary <path>          OCR helper executable, default build/deepstream-anpr-ocr
 ```
 
 ---
@@ -374,7 +398,7 @@ ABC1234 confidence=0.91
 
 If no OCR result is accepted, the command exits with code `2`.
 
-The full pipeline calls this helper automatically. You normally use this command only when testing OCR quality on saved crops from `evidence/`.
+The full pipeline calls this helper automatically in `--server` mode. You normally use the single-image command only when testing OCR quality on saved crops from `evidence/`.
 
 ---
 
@@ -432,10 +456,14 @@ Full pipeline defaults:
 evidence-dir=evidence
 events=output/events.csv
 ocr-helper=build/deepstream-anpr-ocr
-max-ocr-attempts=5
+max-ocr-attempts=0
+crop-padding=0.20
+min-det-confidence=0.25
+min-crop-width=24
+min-crop-height=8
 ```
 
-The default OCR attempt cap keeps sample runs predictable because spawning a TensorRT OCR helper for every detection on every frame is slow. Increase this in `include/full_pipeline.hpp` when you move to a persistent OCR worker or in-process TensorRT-compatible OCR path.
+`max-ocr-attempts=0` means unlimited OCR attempts. Use `--max-ocr-attempts 5` or another small number during quick local tests.
 
 ---
 
@@ -507,9 +535,9 @@ Then build the OCR engine:
 
 ### Full pipeline is slow
 
-The current full pipeline uses `build/deepstream-anpr-ocr` as an external OCR helper to avoid TensorRT 10/11 conflicts with DeepStream. This is correct for compatibility, but slower than an in-process OCR engine.
+The full pipeline uses `build/deepstream-anpr-ocr --server` as a persistent external OCR worker to avoid TensorRT 10/11 conflicts with DeepStream. This is much faster than starting OCR separately for each crop, but still slower than a fully in-process OCR stage.
 
-The default `max_ocr_attempts` is capped in `include/full_pipeline.hpp`. For production, replace the helper-per-crop call with a persistent OCR worker process or align DeepStream and OCR to the same TensorRT major version.
+For the fastest production design, align DeepStream and OCR to the same TensorRT major version and move OCR in process. Until then, tune `--max-ocr-attempts`, `--min-det-confidence`, and crop size thresholds for your camera stream.
 
 ### OCR text is inaccurate
 
@@ -517,14 +545,16 @@ If crops are saved but OCR text is wrong:
 
 1. Inspect the crop images in `evidence/`
 2. Confirm the OCR model is trained for your target plate format
-3. Tune crop padding and resize preprocessing
+3. Tune `--crop-padding`, `--min-det-confidence`, and crop size filters
 4. Check the configured alphabet and blank index in `configs/config_ocr.txt`
 
 ---
 
-## 14. Current Limitations
+## 14. Final Workflow Notes
 
-- Full detector -> tracker -> crop -> OCR -> CSV event flow is implemented.
-- OCR currently runs as a helper process for TensorRT compatibility, so it is slower than a native in-process OCR stage.
-- OCR quality depends heavily on crop quality and whether the LPRNet model matches the target plate format.
-- The default full-pipeline run limits OCR attempts to keep local testing fast.
+- Full detector -> tracker -> padded crop -> persistent OCR worker -> CSV event flow is implemented.
+- OCR no longer starts a new process for every crop. The main app starts one OCR worker and streams crop paths to it.
+- Crop quality is improved with configurable padding, detector confidence filtering, and minimum crop-size filtering.
+- OCR attempts are unlimited by default. Use `--max-ocr-attempts <n>` only when you want a short local test.
+- OCR is still out of process because of the local TensorRT major-version mismatch between DeepStream `nvinfer` and the OCR engine. Native in-process OCR requires both paths to use a compatible TensorRT runtime.
+- OCR accuracy still depends on whether the LPRNet model, alphabet, blank index, and training data match the target license-plate format.

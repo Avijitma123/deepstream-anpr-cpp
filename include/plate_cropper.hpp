@@ -2,6 +2,7 @@
 
 #include "anpr_types.hpp"
 
+#include <cstdint>
 #include <filesystem>
 
 namespace anpr {
@@ -15,6 +16,7 @@ public:
 
 private:
     std::filesystem::path evidence_dir_;
+    std::uint64_t crop_index_{0};
 };
 
 }  // namespace anpr

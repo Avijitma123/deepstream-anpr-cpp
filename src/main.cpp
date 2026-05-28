@@ -17,9 +17,16 @@ struct CliOptions {
     std::filesystem::path detector_config{"configs/config_infer_plate_detector.txt"};
     std::filesystem::path tracker_config{"/opt/nvidia/deepstream/deepstream-9.0/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml"};
     std::filesystem::path evidence_dir{"evidence"};
+    std::filesystem::path ocr_binary{"build/deepstream-anpr-ocr"};
     std::filesystem::path events_csv{"output/events.csv"};
+    std::size_t max_ocr_attempts{0};
+    float crop_padding_ratio{0.20F};
+    float min_detector_confidence{0.25F};
+    float min_crop_width{24.0F};
+    float min_crop_height{8.0F};
     bool run_pipeline{false};
     bool display{true};
+    bool showed_help{false};
 };
 
 void printUsage(const char* executable) {
@@ -30,7 +37,13 @@ void printUsage(const char* executable) {
         << "  --detector-config <path>     DeepStream nvinfer config path\n"
         << "  --tracker-config <path>      DeepStream tracker config path\n"
         << "  --evidence-dir <path>        Plate crop output directory\n"
+        << "  --ocr-binary <path>          OCR helper executable path\n"
         << "  --events <path>              CSV event log path\n"
+        << "  --max-ocr-attempts <n>       Limit OCR attempts; 0 means unlimited\n"
+        << "  --crop-padding <ratio>       Crop padding ratio around detected box\n"
+        << "  --min-det-confidence <n>     Minimum detector confidence before crop/OCR\n"
+        << "  --min-crop-width <px>        Minimum crop width before OCR\n"
+        << "  --min-crop-height <px>       Minimum crop height before OCR\n"
         << "  --no-display                 Use fakesink instead of rendering output\n"
         << "  --run                        Launch the generated GStreamer pipeline\n"
         << "  --help                       Show this help\n";
@@ -56,14 +69,27 @@ bool parseArgs(int argc, char** argv, CliOptions& options) {
             options.tracker_config = requireValue(arg);
         } else if (arg == "--evidence-dir") {
             options.evidence_dir = requireValue(arg);
+        } else if (arg == "--ocr-binary") {
+            options.ocr_binary = requireValue(arg);
         } else if (arg == "--events") {
             options.events_csv = requireValue(arg);
+        } else if (arg == "--max-ocr-attempts") {
+            options.max_ocr_attempts = static_cast<std::size_t>(std::stoull(requireValue(arg)));
+        } else if (arg == "--crop-padding") {
+            options.crop_padding_ratio = std::stof(requireValue(arg));
+        } else if (arg == "--min-det-confidence") {
+            options.min_detector_confidence = std::stof(requireValue(arg));
+        } else if (arg == "--min-crop-width") {
+            options.min_crop_width = std::stof(requireValue(arg));
+        } else if (arg == "--min-crop-height") {
+            options.min_crop_height = std::stof(requireValue(arg));
         } else if (arg == "--no-display") {
             options.display = false;
         } else if (arg == "--run") {
             options.run_pipeline = true;
         } else if (arg == "--help") {
             printUsage(argv[0]);
+            options.showed_help = true;
             return false;
         } else {
             throw std::runtime_error("unknown argument: " + arg);
@@ -73,6 +99,15 @@ bool parseArgs(int argc, char** argv, CliOptions& options) {
     if (options.source.empty()) {
         printUsage(argv[0]);
         return false;
+    }
+    if (options.crop_padding_ratio < 0.0F) {
+        throw std::runtime_error("--crop-padding must be >= 0");
+    }
+    if (options.min_detector_confidence < 0.0F) {
+        throw std::runtime_error("--min-det-confidence must be >= 0");
+    }
+    if (options.min_crop_width < 0.0F || options.min_crop_height < 0.0F) {
+        throw std::runtime_error("--min-crop-width and --min-crop-height must be >= 0");
     }
     return true;
 }
@@ -84,7 +119,7 @@ int main(int argc, char** argv) {
 
     try {
         if (!parseArgs(argc, argv, options)) {
-            return options.source.empty() ? 1 : 0;
+            return options.showed_help ? 0 : 1;
         }
 
         anpr::EventManager event_manager({}, anpr::DbWriter(options.events_csv));
@@ -109,6 +144,12 @@ int main(int argc, char** argv) {
             full_config.pipeline = pipeline_config;
             full_config.camera_id = options.camera_id;
             full_config.evidence_dir = options.evidence_dir;
+            full_config.ocr_binary = options.ocr_binary;
+            full_config.max_ocr_attempts = options.max_ocr_attempts;
+            full_config.crop_padding_ratio = options.crop_padding_ratio;
+            full_config.min_detector_confidence = options.min_detector_confidence;
+            full_config.min_crop_width = options.min_crop_width;
+            full_config.min_crop_height = options.min_crop_height;
             anpr::FullPipeline full_pipeline(full_config, post_processor, event_manager);
             return full_pipeline.run();
         }

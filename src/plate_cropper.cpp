@@ -1,5 +1,6 @@
 #include "plate_cropper.hpp"
 
+#include <cctype>
 #include <iomanip>
 #include <sstream>
 
@@ -16,6 +17,19 @@ std::string timestampForPath(const std::chrono::system_clock::time_point& value)
     return output.str();
 }
 
+std::string safePathToken(const std::string& value) {
+    std::string safe;
+    safe.reserve(value.size());
+    for (const unsigned char ch : value) {
+        if (std::isalnum(ch) != 0 || ch == '-' || ch == '_') {
+            safe.push_back(static_cast<char>(ch));
+        } else {
+            safe.push_back('_');
+        }
+    }
+    return safe.empty() ? "camera" : safe;
+}
+
 }  // namespace
 
 PlateCropper::PlateCropper(std::filesystem::path evidence_dir) : evidence_dir_(std::move(evidence_dir)) {}
@@ -27,8 +41,9 @@ bool PlateCropper::prepare() {
 
 std::filesystem::path PlateCropper::crop(const PlateDetection& detection) {
     std::ostringstream file_name;
-    file_name << detection.camera_id << '_'
+    file_name << safePathToken(detection.camera_id) << '_'
               << detection.tracking_id << '_'
+              << crop_index_++ << '_'
               << timestampForPath(detection.timestamp) << ".jpg";
     return evidence_dir_ / file_name.str();
 }
