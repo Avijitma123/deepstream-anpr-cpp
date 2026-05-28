@@ -15,6 +15,8 @@ struct FullPipelineConfig {
     std::filesystem::path evidence_dir{"evidence"};
     std::filesystem::path ocr_binary{"build/deepstream-anpr-ocr"};
     std::size_t max_ocr_attempts{0};
+    std::size_t max_ocr_attempts_per_track{3};
+    int ocr_timeout_ms{5000};
     float crop_padding_ratio{0.20F};
     float min_detector_confidence{0.25F};
     float min_crop_width{24.0F};

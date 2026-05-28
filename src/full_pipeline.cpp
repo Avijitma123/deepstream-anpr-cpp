@@ -9,6 +9,7 @@
 #include "plate_cropper.hpp"
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -17,10 +18,13 @@
 #include <algorithm>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -35,7 +39,8 @@ struct ProbeContext {
     NvDsObjEncCtxHandle encoder{nullptr};
     class OcrWorker* ocr_worker{nullptr};
     std::size_t ocr_attempts{0};
-    std::unordered_set<std::uint64_t> processed_tracking_ids;
+    std::unordered_map<std::uint64_t, std::size_t> ocr_attempts_by_tracking_id;
+    std::unordered_set<std::uint64_t> completed_tracking_ids;
 };
 
 class OcrWorker {
@@ -43,7 +48,7 @@ public:
     explicit OcrWorker(std::filesystem::path binary) : binary_(std::move(binary)) {}
 
     ~OcrWorker() {
-        stop();
+        stop(false);
     }
 
     bool start() {
@@ -94,22 +99,33 @@ public:
             if (output_ == nullptr) {
                 close(stdout_pipe[0]);
             }
-            stop();
+            stop(true);
             return false;
         }
         return true;
     }
 
-    OcrResult recognize(const std::filesystem::path& crop_path) {
+    OcrResult recognize(const std::filesystem::path& crop_path, int timeout_ms) {
         if (input_ == nullptr || output_ == nullptr) {
             return {};
         }
 
-        std::fprintf(input_, "%s\n", crop_path.string().c_str());
-        std::fflush(input_);
+        if (std::fprintf(input_, "%s\n", crop_path.string().c_str()) < 0 || std::fflush(input_) != 0) {
+            std::cerr << "OCR worker write failed; restarting worker\n";
+            restart();
+            return {};
+        }
+
+        if (!waitForOutput(timeout_ms)) {
+            std::cerr << "OCR worker timed out on crop: " << crop_path << "; restarting worker\n";
+            restart();
+            return {};
+        }
 
         std::array<char, 512> buffer{};
         if (std::fgets(buffer.data(), static_cast<int>(buffer.size()), output_) == nullptr) {
+            std::cerr << "OCR worker stopped unexpectedly; restarting worker\n";
+            restart();
             return {};
         }
 
@@ -126,10 +142,41 @@ public:
     }
 
 private:
-    void stop() {
+    bool waitForOutput(int timeout_ms) const {
+        if (output_ == nullptr) {
+            return false;
+        }
+
+        const int output_fd = fileno(output_);
+        if (output_fd < 0) {
+            return false;
+        }
+
+        pollfd descriptor{};
+        descriptor.fd = output_fd;
+        descriptor.events = POLLIN;
+
+        int result = 0;
+        do {
+            result = poll(&descriptor, 1, timeout_ms);
+        } while (result < 0 && errno == EINTR);
+
+        return result > 0 && (descriptor.revents & POLLIN) != 0;
+    }
+
+    void restart() {
+        stop(true);
+        if (!start()) {
+            std::cerr << "Failed to restart OCR worker: " << binary_ << '\n';
+        }
+    }
+
+    void stop(bool force) {
         if (input_ != nullptr) {
-            std::fprintf(input_, "__quit__\n");
-            std::fflush(input_);
+            if (!force) {
+                std::fprintf(input_, "__quit__\n");
+                std::fflush(input_);
+            }
             std::fclose(input_);
             input_ = nullptr;
         }
@@ -138,6 +185,9 @@ private:
             output_ = nullptr;
         }
         if (child_pid_ > 0) {
+            if (force) {
+                kill(child_pid_, SIGTERM);
+            }
             int status = 0;
             waitpid(child_pid_, &status, 0);
             child_pid_ = -1;
@@ -238,10 +288,17 @@ GstPadProbeReturn metadataProbe(GstPad*, GstPadProbeInfo* info, gpointer user_da
 
             const auto tracking_id = static_cast<std::uint64_t>(object_meta->object_id);
             if ((context->config.max_ocr_attempts > 0 && context->ocr_attempts >= context->config.max_ocr_attempts) ||
-                context->processed_tracking_ids.find(tracking_id) != context->processed_tracking_ids.end()) {
+                context->completed_tracking_ids.find(tracking_id) != context->completed_tracking_ids.end()) {
                 continue;
             }
-            context->processed_tracking_ids.insert(tracking_id);
+
+            const auto track_attempts = context->ocr_attempts_by_tracking_id.find(tracking_id);
+            if (context->config.max_ocr_attempts_per_track > 0 &&
+                track_attempts != context->ocr_attempts_by_tracking_id.end() &&
+                track_attempts->second >= context->config.max_ocr_attempts_per_track) {
+                continue;
+            }
+            ++context->ocr_attempts_by_tracking_id[tracking_id];
             ++context->ocr_attempts;
 
             const auto event_time = std::chrono::system_clock::now();
@@ -277,7 +334,7 @@ GstPadProbeReturn metadataProbe(GstPad*, GstPadProbeInfo* info, gpointer user_da
             nvds_obj_enc_finish(context->encoder);
             object_meta->rect_params = original_rect;
 
-            auto ocr_result = context->ocr_worker->recognize(crop_path);
+            auto ocr_result = context->ocr_worker->recognize(crop_path, context->config.ocr_timeout_ms);
             auto accepted = context->post_processor->accept(ocr_result);
             if (!accepted.has_value()) {
                 ocr_result.text = context->post_processor->normalize(ocr_result.text);
@@ -290,6 +347,8 @@ GstPadProbeReturn metadataProbe(GstPad*, GstPadProbeInfo* info, gpointer user_da
             if (!accepted.has_value()) {
                 continue;
             }
+
+            context->completed_tracking_ids.insert(tracking_id);
 
             PlateEvent event;
             event.camera_id = context->config.camera_id;

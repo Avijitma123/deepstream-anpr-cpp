@@ -144,7 +144,7 @@ metadataProbe
     | read NvDsBatchMeta / NvDsFrameMeta / NvDsObjectMeta
     | keep class_id 0 plate detections only
     | apply min detector confidence and crop size filters
-    | suppress repeated OCR for the same tracker object id
+    | retry OCR on later frames until a track is accepted or retry limit is reached
     v
 PlateCropper
 src/plate_cropper.cpp
@@ -556,6 +556,8 @@ Runtime tuning options:
 
 ```text
 --max-ocr-attempts <n>       Limit OCR attempts; 0 means unlimited
+--max-ocr-attempts-per-track <n>  Limit OCR retries per tracker id; 0 means unlimited
+--ocr-timeout-ms <n>         Restart OCR worker if one crop takes longer than this
 --crop-padding <ratio>       Add padding around each detector box before crop, default 0.20
 --min-det-confidence <n>     Skip detections below this confidence, default 0.25
 --min-crop-width <px>        Skip boxes narrower than this, default 24
@@ -649,13 +651,17 @@ evidence-dir=evidence
 events=output/events.csv
 ocr-helper=build/deepstream-anpr-ocr
 max-ocr-attempts=0
+max-ocr-attempts-per-track=3
+ocr-timeout-ms=5000
 crop-padding=0.20
 min-det-confidence=0.25
 min-crop-width=24
 min-crop-height=8
 ```
 
-`max-ocr-attempts=0` means unlimited OCR attempts. Use `--max-ocr-attempts 5` or another small number during quick local tests.
+`max-ocr-attempts=0` means unlimited total OCR attempts. Use `--max-ocr-attempts 5` or another small number during quick local tests.
+
+`max-ocr-attempts-per-track=3` means the pipeline can retry OCR on later crops for the same tracked plate before giving up. This improves OCR quality when the first crop is blurred, partially visible, or poorly padded.
 
 ---
 
@@ -663,7 +669,8 @@ min-crop-height=8
 
 - Full detector -> tracker -> padded crop -> persistent OCR worker -> CSV event flow is implemented.
 - OCR no longer starts a new process for every crop. The main app starts one OCR worker and streams crop paths to it.
-- Crop quality is improved with configurable padding, detector confidence filtering, and minimum crop-size filtering.
-- OCR attempts are unlimited by default. Use `--max-ocr-attempts <n>` only when you want a short local test.
+- Crop quality is improved with configurable padding, detector confidence filtering, minimum crop-size filtering, and bounded per-track OCR retries.
+- OCR attempts are unlimited globally by default, with three retries per track. Use `--max-ocr-attempts <n>` when you want a short local test.
+- The OCR worker has a timeout and restart path so one stalled OCR crop does not block the DeepStream pipeline indefinitely.
 - OCR is still out of process because of the local TensorRT major-version mismatch between DeepStream `nvinfer` and the OCR engine. Native in-process OCR requires both paths to use a compatible TensorRT runtime.
 - OCR accuracy still depends on whether the LPRNet model, alphabet, blank index, and training data match the target license-plate format.

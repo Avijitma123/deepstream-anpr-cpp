@@ -20,6 +20,8 @@ struct CliOptions {
     std::filesystem::path ocr_binary{"build/deepstream-anpr-ocr"};
     std::filesystem::path events_csv{"output/events.csv"};
     std::size_t max_ocr_attempts{0};
+    std::size_t max_ocr_attempts_per_track{3};
+    int ocr_timeout_ms{5000};
     float crop_padding_ratio{0.20F};
     float min_detector_confidence{0.25F};
     float min_crop_width{24.0F};
@@ -40,6 +42,8 @@ void printUsage(const char* executable) {
         << "  --ocr-binary <path>          OCR helper executable path\n"
         << "  --events <path>              CSV event log path\n"
         << "  --max-ocr-attempts <n>       Limit OCR attempts; 0 means unlimited\n"
+        << "  --max-ocr-attempts-per-track <n>  Limit OCR retries per tracker id; 0 means unlimited\n"
+        << "  --ocr-timeout-ms <n>         Restart OCR worker if one crop takes longer than this\n"
         << "  --crop-padding <ratio>       Crop padding ratio around detected box\n"
         << "  --min-det-confidence <n>     Minimum detector confidence before crop/OCR\n"
         << "  --min-crop-width <px>        Minimum crop width before OCR\n"
@@ -75,6 +79,10 @@ bool parseArgs(int argc, char** argv, CliOptions& options) {
             options.events_csv = requireValue(arg);
         } else if (arg == "--max-ocr-attempts") {
             options.max_ocr_attempts = static_cast<std::size_t>(std::stoull(requireValue(arg)));
+        } else if (arg == "--max-ocr-attempts-per-track") {
+            options.max_ocr_attempts_per_track = static_cast<std::size_t>(std::stoull(requireValue(arg)));
+        } else if (arg == "--ocr-timeout-ms") {
+            options.ocr_timeout_ms = std::stoi(requireValue(arg));
         } else if (arg == "--crop-padding") {
             options.crop_padding_ratio = std::stof(requireValue(arg));
         } else if (arg == "--min-det-confidence") {
@@ -108,6 +116,9 @@ bool parseArgs(int argc, char** argv, CliOptions& options) {
     }
     if (options.min_crop_width < 0.0F || options.min_crop_height < 0.0F) {
         throw std::runtime_error("--min-crop-width and --min-crop-height must be >= 0");
+    }
+    if (options.ocr_timeout_ms <= 0) {
+        throw std::runtime_error("--ocr-timeout-ms must be > 0");
     }
     return true;
 }
@@ -146,6 +157,8 @@ int main(int argc, char** argv) {
             full_config.evidence_dir = options.evidence_dir;
             full_config.ocr_binary = options.ocr_binary;
             full_config.max_ocr_attempts = options.max_ocr_attempts;
+            full_config.max_ocr_attempts_per_track = options.max_ocr_attempts_per_track;
+            full_config.ocr_timeout_ms = options.ocr_timeout_ms;
             full_config.crop_padding_ratio = options.crop_padding_ratio;
             full_config.min_detector_confidence = options.min_detector_confidence;
             full_config.min_crop_width = options.min_crop_width;
