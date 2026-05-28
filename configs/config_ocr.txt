@@ -1,0 +1,10 @@
+# OCR runtime configuration.
+# The first implementation validates this file and exposes the OCR module boundary.
+# TensorRT bindings, alphabet, and decoder details should be added when the OCR model is finalized.
+
+model-engine-file=models/ocr.engine
+onnx-file=models/ocr.onnx
+input-layer=input
+output-layer=output
+alphabet=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ
+min-confidence=0.60

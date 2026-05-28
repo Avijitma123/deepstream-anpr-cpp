@@ -1,0 +1,2 @@
+# Replace this with your camera stream.
+rtsp://username:password@camera-ip:554/stream1
